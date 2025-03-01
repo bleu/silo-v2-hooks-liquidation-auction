@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import "forge-std/Test.sol";
 import {IERC20} from "openzeppelin5/token/ERC20/IERC20.sol";
 import {ISiloConfig} from "silo-contracts-v2/silo-core/contracts/interfaces/ISiloConfig.sol";
+import {ISilo} from "silo-contracts-v2/silo-core/contracts/interfaces/ISilo.sol";
 import {Hook} from "silo-contracts-v2/silo-core/contracts/lib/Hook.sol";
 import {LiquidationAuctionHook} from "../contracts/LiquidationAuctionHook.sol";
 
@@ -29,6 +30,7 @@ contract LiquidationAuctionHookArbitrumTest is Labels {
     LiquidationAuctionHook public auctionHook;
 
     // Test addresses (using Foundry's makeAddr helper)
+    address liquidityProvider = makeAddr("liquidityProvider");
     address bidderA = makeAddr("bidderA");
     address bidderB = makeAddr("bidderB");
     address borrower = makeAddr("borrower");
@@ -792,6 +794,62 @@ contract LiquidationAuctionHookArbitrumTest is Labels {
             "New auction should have no bidder initially"
         );
         assertEq(amount, 0, "New auction should have no bid amount initially");
+    }
+
+    function test_LiquidationFromAuthorizedLiquidator() public {
+        (address silo0, address silo1) = siloConfig.getSilos();
+
+        // Deal tokens and approve them while under the same prank
+        vm.startPrank(liquidityProvider);
+
+        deal(ArbitrumLib.WETH, liquidityProvider, 1e22);
+        deal(ArbitrumLib.USDC, liquidityProvider, 1e22);
+
+        // Approve tokens for the silos
+        IERC20(ArbitrumLib.WETH).approve(silo0, 1e22);
+        IERC20(ArbitrumLib.USDC).approve(silo1, 1e22);
+
+        // Attempt deposits
+        ISilo(silo0).deposit(1e22, liquidityProvider);
+        ISilo(silo1).deposit(1e22, liquidityProvider);
+
+        vm.stopPrank();
+
+        // Deal WETH to borrower BEFORE trying to deposit
+        deal(ArbitrumLib.WETH, borrower, 1e21);
+
+        // set up liquidatable position for borrower
+        vm.startPrank(borrower);
+        IERC20(ArbitrumLib.WETH).approve(silo0, 1e21);
+        ISilo(silo0).deposit(1e21, borrower);
+
+        // find out what's the max borrowable amount for borrower
+        uint256 maxBorrowable = ISilo(silo1).maxBorrow(borrower);
+        ISilo(silo1).borrow(maxBorrowable, borrower, borrower);
+        vm.stopPrank();
+
+        // bidderA wins auction 1
+        vm.prank(bidderA);
+        auctionHook.placeBid(borrower, 1 ether);
+
+        vm.roll(block.number + auctionHook.AUCTION_BLOCKS());
+
+        // bidderA should be the authorized liquidator
+        (address solver, uint256 bid) = auctionHook.getAuthorizedLiquidator(
+            borrower
+        );
+        assertEq(solver, bidderA, "Authorized liquidator should be bidderA");
+        assertEq(bid, 1 ether, "Authorized bid should be 1 ether");
+
+        vm.prank(bidderB);
+        vm.expectRevert(UnauthorizedLiquidator);
+        auctionHook.liquidationCall(
+            ArbitrumLib.WETH,
+            ArbitrumLib.USDC,
+            borrower,
+            1e18,
+            true
+        );
     }
 
     // --- Helper Function ---
