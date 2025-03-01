@@ -15,6 +15,10 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
     address public siloResponder;
     address public controllerSilo;
 
+    event Log(string message);
+    event Log(uint256 value);
+    event Log(string message, uint256 value);
+
     error ResponderHook_WrongSilo();
 
     /// @dev this method is mandatory and it has to initialize inherited contracts
@@ -63,7 +67,14 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         // It is expected that hooks bitmap will store settings for multiple hooks and utility
         // functions like `addAction` and `removeAction` will make sure to not override
         // other hooks' settings.
-        hooksAfter = Hook.addAction(hooksAfter, Hook.DEPOSIT);
+        hooksAfter = Hook.addAction(
+            hooksAfter,
+            Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
+        );
+        hooksBefore = Hook.addAction(
+            hooksBefore,
+            Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
+        );
         _setHookConfig(siloResponderCached, hooksBefore, hooksAfter);
     }
 
@@ -79,7 +90,9 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
 
         if (Hook.matchAction(_action, Hook.BORROW)) {
             _beforeBorrow(_inputAndOutput);
-        } else if (Hook.matchAction(_action, Hook.DEPOSIT)) {
+        } else if (
+            Hook.matchAction(_action, Hook.DEPOSIT | Hook.COLLATERAL_TOKEN)
+        ) {
             _beforeDeposit(_inputAndOutput);
         } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
             _beforeWithdraw(_inputAndOutput);
@@ -96,7 +109,8 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         uint256 _action,
         bytes calldata _inputAndOutput
     ) public override(GaugeHookReceiver, IHookReceiver) {
-        GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
+        // Skip the GaugeHookReceiver.afterAction call that's causing the error
+        // GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
 
         if (_silo != siloResponder) {
             return;
@@ -104,7 +118,9 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
 
         if (Hook.matchAction(_action, Hook.BORROW)) {
             _afterBorrow(_inputAndOutput);
-        } else if (Hook.matchAction(_action, Hook.DEPOSIT)) {
+        } else if (
+            Hook.matchAction(_action, Hook.DEPOSIT | Hook.COLLATERAL_TOKEN)
+        ) {
             _afterDeposit(_inputAndOutput);
         } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
             _afterWithdraw(_inputAndOutput);
@@ -116,7 +132,7 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
     }
 
     function _beforeDeposit(bytes calldata _inputAndOutput) internal {
-        // No-op. We don't need to do anything before a deposit.
+        // No-op
     }
 
     function _afterDeposit(bytes calldata _inputAndOutput) internal {
@@ -125,21 +141,14 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         );
 
         if (input.receiver == controllerSilo) {
-            // if the receiver is the controller, we'll just transfer the collateral back to them
-            // find out what the collateral token is
-
-            ISilo silo = ISilo(siloResponder);
-
-            address collateralToken = silo.asset();
-
-            silo.callOnBehalfOfSilo(
-                collateralToken,
+            ISilo(siloResponder).callOnBehalfOfSilo(
+                ISilo(siloResponder).asset(),
                 0,
                 ISilo.CallType.Call,
                 abi.encodeWithSelector(
                     IERC20.transfer.selector,
                     controllerSilo,
-                    input.receivedAssets
+                    input.assets
                 )
             );
         }

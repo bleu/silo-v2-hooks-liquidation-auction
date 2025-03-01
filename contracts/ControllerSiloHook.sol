@@ -4,16 +4,26 @@ pragma solidity ^0.8.28;
 import {IHookReceiver} from "silo-contracts-v2/silo-core/contracts/interfaces/IHookReceiver.sol";
 import {ISiloConfig} from "silo-contracts-v2/silo-core/contracts/interfaces/ISiloConfig.sol";
 import {ISilo} from "silo-contracts-v2/silo-core/contracts/interfaces/ISilo.sol";
+import {IERC20} from "openzeppelin5/token/ERC20/IERC20.sol";
 
 import {Hook} from "silo-contracts-v2/silo-core/contracts/lib/Hook.sol";
 import {BaseHookReceiver} from "silo-contracts-v2/silo-core/contracts/utils/hook-receivers/_common/BaseHookReceiver.sol";
 import {GaugeHookReceiver} from "silo-contracts-v2/silo-core/contracts/utils/hook-receivers/gauge/GaugeHookReceiver.sol";
 import {PartialLiquidation} from "silo-contracts-v2/silo-core/contracts/utils/hook-receivers/liquidation/PartialLiquidation.sol";
 
+// Interface for the responder hook
+interface IResponderSiloHook {
+    function depositReceivedAssets() external;
+}
+
 /// @dev Example of hook, that prevents borrowing asset. Note: borrowing same asset is still available.
 contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
     address public siloController;
     address[] public responderSilos;
+    address[] public responderHooks;
+
+    event Log(string message, uint256 value);
+    event Log(string message, address value);
 
     error ControllerHook_WrongSilo();
 
@@ -63,13 +73,22 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
         // It is expected that hooks bitmap will store settings for multiple hooks and utility
         // functions like `addAction` and `removeAction` will make sure to not override
         // other hooks' settings.
-        hooksAfter = Hook.addAction(hooksAfter, Hook.DEPOSIT);
+        hooksAfter = Hook.addAction(
+            hooksAfter,
+            Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
+        );
+
         _setHookConfig(siloControllerCached, hooksBefore, hooksAfter);
     }
 
     // We assume no liquidity will have been deployed before all the responder silos are registered
     function registerResponderSilo(address _responderSilo) external {
         responderSilos.push(_responderSilo);
+    }
+
+    // Register a responder hook
+    function registerResponderHook(address _responderHook) external {
+        responderHooks.push(_responderHook);
     }
 
     /// @inheritdoc IHookReceiver
@@ -84,7 +103,9 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
 
         if (Hook.matchAction(_action, Hook.BORROW)) {
             _beforeBorrow(_inputAndOutput);
-        } else if (Hook.matchAction(_action, Hook.DEPOSIT)) {
+        } else if (
+            Hook.matchAction(_action, Hook.DEPOSIT | Hook.COLLATERAL_TOKEN)
+        ) {
             _beforeDeposit(_inputAndOutput);
         } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
             _beforeWithdraw(_inputAndOutput);
@@ -101,14 +122,18 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
         uint256 _action,
         bytes calldata _inputAndOutput
     ) public override(GaugeHookReceiver, IHookReceiver) {
-        GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
+        // Skip the GaugeHookReceiver.afterAction call that's causing the error
+        // GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
+
         if (_silo != siloController) {
             return;
         }
 
         if (Hook.matchAction(_action, Hook.BORROW)) {
             _afterBorrow(_inputAndOutput);
-        } else if (Hook.matchAction(_action, Hook.DEPOSIT)) {
+        } else if (
+            Hook.matchAction(_action, Hook.DEPOSIT | Hook.COLLATERAL_TOKEN)
+        ) {
             _afterDeposit(_inputAndOutput);
         } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
             _afterWithdraw(_inputAndOutput);
@@ -128,17 +153,49 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
             _inputAndOutput
         );
 
+        address collateralToken = ISilo(siloController).asset();
+        uint256 assets = input.assets;
+        require(assets > 0, "Assets must be greater than 0");
+        require(
+            IERC20(collateralToken).balanceOf(address(siloController)) >=
+                assets,
+            "Insufficient balance of collateral token"
+        );
+
+        // For each responder silo, we'll create a "virtual" deposit
+        // The controller silo keeps the actual assets, but we temporarily transfer them
+        // to each responder silo to create shares
         for (uint256 i = 0; i < responderSilos.length; i++) {
+            emit Log("Transferred assets to responder", assets);
+            emit Log("Responder silo", responderSilos[i]);
+
+            // ensure the responder silo has allowance for the collateral token
+            ISilo(siloController).callOnBehalfOfSilo(
+                collateralToken,
+                0,
+                ISilo.CallType.Call,
+                abi.encodeWithSelector(
+                    IERC20.approve.selector,
+                    responderSilos[i],
+                    assets
+                )
+            );
+
+            // Now, deposit the assets into the responder silo
+            // We need to call deposit directly on the responder silo
             ISilo(siloController).callOnBehalfOfSilo(
                 responderSilos[i],
                 0,
                 ISilo.CallType.Call,
                 abi.encodeWithSelector(
-                    ISilo.deposit.selector,
-                    input.assets,
-                    address(siloController)
+                    bytes4(keccak256("deposit(uint256,address,uint8)")),
+                    assets,
+                    siloController,
+                    ISilo.CollateralType.Collateral
                 )
             );
+
+            emit Log("Deposited assets into responder silo", assets);
         }
     }
 

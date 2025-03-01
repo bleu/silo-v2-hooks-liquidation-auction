@@ -43,16 +43,6 @@ contract SharedAssetTest is Labels {
             _getHookAddress(controllerSiloConfig)
         );
 
-        emit log_named_address(
-            "controllerSiloConfig",
-            address(controllerSiloConfig)
-        );
-
-        emit log_named_address(
-            "clonedControllerHook",
-            address(clonedControllerHook)
-        );
-
         siloController = ISilo(clonedControllerHook.siloController());
 
         responderSiloConfig = deployer.deploySilo(
@@ -71,8 +61,20 @@ contract SharedAssetTest is Labels {
             clonedResponderHook.siloResponder()
         );
 
-        _setLabels(controllerSiloConfig);
-        _setLabels(responderSiloConfig);
+        // Register the responder hook with the controller hook
+        clonedControllerHook.registerResponderHook(
+            address(clonedResponderHook)
+        );
+
+        _setLabels(controllerSiloConfig, responderSiloConfig);
+
+        // Add specific controller/responder labels
+        _setControllerResponderLabels(
+            address(siloController),
+            address(siloResponder),
+            address(clonedControllerHook),
+            address(clonedResponderHook)
+        );
     }
 
     function _getUSDC(address _user, uint256 _amount) internal {
@@ -100,39 +102,58 @@ contract SharedAssetTest is Labels {
         hook = _siloConfig.getConfig(silo).hookReceiver;
     }
 
-    function test_DepositToControllerSilo() public {
-        // Perform the deposit
+    // create a function to set up the test scenario where the controller Silo virtually distributes
+    // the collateral token to the responder silos but does not transfer the assets to the responder silos
+    function _depositToControllerSilo() internal {
         _deposit(siloController, ArbitrumLib.WETH_WHALE, 1e21);
 
+        _userHasShares(siloController, ArbitrumLib.WETH_WHALE, 1e21);
+        _siloHasAssets(siloController, 1e21);
+        _siloHasSomeTotalSupply(siloController);
+
+        _userHasShares(siloResponder, address(siloController), 1e21);
+
+        _siloHasSomeTotalSupply(siloResponder);
+        _siloDoesNotHaveAssets(siloResponder, 1e21);
+    }
+
+    function _withdrawFromControllerSilo() internal {
+        _withdraw(siloController, ArbitrumLib.WETH_WHALE, 1e21);
+    }
+
+    function _userHasShares(
+        ISilo _silo,
+        address _user,
+        uint256 _amount
+    ) internal {
         assertEq(
-            IERC20(ArbitrumLib.WETH).balanceOf(address(siloController)),
-            1e21
-        );
-        // check that user has collateral token from controller silo
-        assertEq(
-            siloController.balanceOf(ArbitrumLib.WETH_WHALE),
-            siloController.convertToShares(1e21),
+            _silo.balanceOf(_user),
+            _silo.convertToShares(_amount),
             "user should have shares from controller silo"
         );
+    }
 
-        // check that total supply of responder silo is bigger than 0
-        assertGt(
-            siloResponder.totalSupply(),
-            0,
-            "responder silo should have a total supply"
+    function _siloHasAssets(ISilo _silo, uint256 _amount) internal {
+        assertEq(
+            IERC20(_silo.asset()).balanceOf(address(_silo)),
+            _amount,
+            "silo should have assets"
         );
+    }
 
-        // check that controller silo has collateral token from responder silos
+    function _siloDoesNotHaveAssets(ISilo _silo, uint256 _amount) internal {
         assertEq(
-            siloResponder.balanceOf(address(siloController)),
-            siloResponder.convertToShares(1e21),
-            "controller silo should have shares from responder silo"
-        );
-        // check that responder silos do not have any assets (WETH)
-        assertEq(
-            IERC20(ArbitrumLib.WETH).balanceOf(address(siloResponder)),
+            IERC20(_silo.asset()).balanceOf(address(_silo)),
             0,
-            "responder silos should not have any assets"
+            "silo should not have assets"
         );
+    }
+
+    function _siloHasSomeTotalSupply(ISilo _silo) internal {
+        assertGt(_silo.totalSupply(), 0, "silo should have a total supply");
+    }
+
+    function test_DepositToControllerSilo() public {
+        _depositToControllerSilo();
     }
 }
