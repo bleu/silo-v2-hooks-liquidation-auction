@@ -18,12 +18,13 @@ interface IResponderSiloHook {
 
 /// @dev Example of hook, that prevents borrowing asset. Note: borrowing same asset is still available.
 contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
-    address public siloController;
+    address public controllerSilo;
     address[] public responderSilos;
     address[] public responderHooks;
 
     event Log(string message, uint256 value);
     event Log(string message, address value);
+    event Log(string message, bytes value);
 
     error ControllerHook_WrongSilo();
 
@@ -53,18 +54,18 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
         address sharedAsset
     ) internal {
         (address silo0, address silo1) = _siloConfig.getSilos();
-        address siloControllerCached;
+        address controllerSiloCached;
 
-        if (ISilo(silo0).asset() == sharedAsset) siloControllerCached = silo0;
+        if (ISilo(silo0).asset() == sharedAsset) controllerSiloCached = silo0;
         else if (ISilo(silo1).asset() == sharedAsset)
-            siloControllerCached = silo1;
+            controllerSiloCached = silo1;
         else revert ControllerHook_WrongSilo();
 
-        siloController = siloControllerCached;
+        controllerSilo = controllerSiloCached;
 
         // fetch current setup in case there were some hooks already implemented
         (uint256 hooksBefore, uint256 hooksAfter) = _hookReceiverConfig(
-            siloControllerCached
+            controllerSiloCached
         );
 
         // your code here
@@ -78,7 +79,22 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
             Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
         );
 
-        _setHookConfig(siloControllerCached, hooksBefore, hooksAfter);
+        hooksAfter = Hook.addAction(
+            hooksAfter,
+            Hook.WITHDRAW | Hook.COLLATERAL_TOKEN
+        );
+
+        hooksBefore = Hook.addAction(
+            hooksBefore,
+            Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
+        );
+
+        hooksBefore = Hook.addAction(
+            hooksBefore,
+            Hook.WITHDRAW | Hook.COLLATERAL_TOKEN
+        );
+
+        _setHookConfig(controllerSiloCached, hooksBefore, hooksAfter);
     }
 
     // We assume no liquidity will have been deployed before all the responder silos are registered
@@ -97,7 +113,7 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
         uint256 _action,
         bytes calldata _inputAndOutput
     ) public override {
-        if (_silo != siloController) {
+        if (_silo != controllerSilo) {
             return;
         }
 
@@ -107,7 +123,9 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
             Hook.matchAction(_action, Hook.DEPOSIT | Hook.COLLATERAL_TOKEN)
         ) {
             _beforeDeposit(_inputAndOutput);
-        } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
+        } else if (
+            Hook.matchAction(_action, Hook.WITHDRAW | Hook.COLLATERAL_TOKEN)
+        ) {
             _beforeWithdraw(_inputAndOutput);
         } else if (Hook.matchAction(_action, Hook.LIQUIDATION)) {
             _beforeLiquidate(_inputAndOutput);
@@ -125,7 +143,7 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
         // Skip the GaugeHookReceiver.afterAction call that's causing the error
         // GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
 
-        if (_silo != siloController) {
+        if (_silo != controllerSilo) {
             return;
         }
 
@@ -135,7 +153,9 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
             Hook.matchAction(_action, Hook.DEPOSIT | Hook.COLLATERAL_TOKEN)
         ) {
             _afterDeposit(_inputAndOutput);
-        } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
+        } else if (
+            Hook.matchAction(_action, Hook.WITHDRAW | Hook.COLLATERAL_TOKEN)
+        ) {
             _afterWithdraw(_inputAndOutput);
         } else if (Hook.matchAction(_action, Hook.LIQUIDATION)) {
             _afterLiquidate(_inputAndOutput);
@@ -153,11 +173,11 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
             _inputAndOutput
         );
 
-        address collateralToken = ISilo(siloController).asset();
+        address collateralToken = ISilo(controllerSilo).asset();
         uint256 assets = input.assets;
         require(assets > 0, "Assets must be greater than 0");
         require(
-            IERC20(collateralToken).balanceOf(address(siloController)) >=
+            IERC20(collateralToken).balanceOf(address(controllerSilo)) >=
                 assets,
             "Insufficient balance of collateral token"
         );
@@ -170,7 +190,7 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
             emit Log("Responder silo", responderSilos[i]);
 
             // ensure the responder silo has allowance for the collateral token
-            ISilo(siloController).callOnBehalfOfSilo(
+            ISilo(controllerSilo).callOnBehalfOfSilo(
                 collateralToken,
                 0,
                 ISilo.CallType.Call,
@@ -183,14 +203,14 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
 
             // Now, deposit the assets into the responder silo
             // We need to call deposit directly on the responder silo
-            ISilo(siloController).callOnBehalfOfSilo(
+            ISilo(controllerSilo).callOnBehalfOfSilo(
                 responderSilos[i],
                 0,
                 ISilo.CallType.Call,
                 abi.encodeWithSelector(
                     bytes4(keccak256("deposit(uint256,address,uint8)")),
                     assets,
-                    siloController,
+                    controllerSilo,
                     ISilo.CollateralType.Collateral
                 )
             );
@@ -200,7 +220,42 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
     }
 
     function _beforeWithdraw(bytes calldata _inputAndOutput) internal {
-        // TODO: implement
+        emit Log("Before withdraw", _inputAndOutput);
+        Hook.BeforeWithdrawInput memory input = Hook.beforeWithdrawDecode(
+            _inputAndOutput
+        );
+        // since we have shares from the responder silos, we need to burn them. So we send
+        // the collateral token to each responder silo to burn the shares. And it will be
+        // transferred back to the controller silo after the shares are burned.
+        for (uint256 i = 0; i < responderSilos.length; i++) {
+            ISilo(controllerSilo).callOnBehalfOfSilo(
+                ISilo(controllerSilo).asset(),
+                0,
+                ISilo.CallType.Call,
+                abi.encodeWithSelector(
+                    IERC20.transfer.selector,
+                    responderSilos[i],
+                    input.assets
+                )
+            );
+
+            ISilo(controllerSilo).callOnBehalfOfSilo(
+                responderSilos[i],
+                0,
+                ISilo.CallType.Call,
+                abi.encodeWithSelector(
+                    ISilo.withdraw.selector,
+                    input.assets,
+                    controllerSilo,
+                    controllerSilo,
+                    ISilo.CollateralType.Collateral
+                )
+            );
+        }
+    }
+
+    function _afterWithdraw(bytes calldata _inputAndOutput) internal {
+        emit Log("After withdraw", _inputAndOutput);
     }
 
     function _beforeBorrow(bytes calldata _inputAndOutput) internal {
@@ -208,10 +263,6 @@ contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
     }
 
     function _beforeLiquidate(bytes calldata _inputAndOutput) internal {
-        // TODO: implement
-    }
-
-    function _afterWithdraw(bytes calldata _inputAndOutput) internal {
         // TODO: implement
     }
 

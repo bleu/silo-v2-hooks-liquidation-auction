@@ -21,8 +21,8 @@ import {ArbitrumLib} from "./common/ArbitrumLib.sol";
 contract SharedAssetTest is Labels {
     ISiloConfig public controllerSiloConfig;
     ISiloConfig public responderSiloConfig;
-    ISilo public siloController;
-    ISilo public siloResponder;
+    ISilo public controllerSilo;
+    ISilo public responderSilo;
 
     ControllerSiloHook public clonedControllerHook;
     ResponderSiloHook public clonedResponderHook;
@@ -43,22 +43,22 @@ contract SharedAssetTest is Labels {
             _getHookAddress(controllerSiloConfig)
         );
 
-        siloController = ISilo(clonedControllerHook.siloController());
+        controllerSilo = ISilo(clonedControllerHook.controllerSilo());
 
         responderSiloConfig = deployer.deploySilo(
             ArbitrumLib.SILO_DEPLOYER,
             address(new ResponderSiloHook()),
-            abi.encode(address(this), ArbitrumLib.WETH, siloController)
+            abi.encode(address(this), ArbitrumLib.WETH, controllerSilo)
         );
 
         clonedResponderHook = ResponderSiloHook(
             _getHookAddress(responderSiloConfig)
         );
 
-        siloResponder = ISilo(clonedResponderHook.siloResponder());
+        responderSilo = ISilo(clonedResponderHook.responderSilo());
 
         clonedControllerHook.registerResponderSilo(
-            clonedResponderHook.siloResponder()
+            clonedResponderHook.responderSilo()
         );
 
         // Register the responder hook with the controller hook
@@ -70,8 +70,8 @@ contract SharedAssetTest is Labels {
 
         // Add specific controller/responder labels
         _setControllerResponderLabels(
-            address(siloController),
-            address(siloResponder),
+            address(controllerSilo),
+            address(responderSilo),
             address(clonedControllerHook),
             address(clonedResponderHook)
         );
@@ -105,20 +105,30 @@ contract SharedAssetTest is Labels {
     // create a function to set up the test scenario where the controller Silo virtually distributes
     // the collateral token to the responder silos but does not transfer the assets to the responder silos
     function _depositToControllerSilo() internal {
-        _deposit(siloController, ArbitrumLib.WETH_WHALE, 1e21);
+        _deposit(controllerSilo, ArbitrumLib.WETH_WHALE, 1e21);
 
-        _userHasShares(siloController, ArbitrumLib.WETH_WHALE, 1e21);
-        _siloHasAssets(siloController, 1e21);
-        _siloHasSomeTotalSupply(siloController);
+        _userHasShares(controllerSilo, ArbitrumLib.WETH_WHALE, 1e21);
+        _siloHasAssets(controllerSilo, 1e21);
+        _siloHasSomeTotalSupply(controllerSilo);
 
-        _userHasShares(siloResponder, address(siloController), 1e21);
+        _userHasShares(responderSilo, address(controllerSilo), 1e21);
 
-        _siloHasSomeTotalSupply(siloResponder);
-        _siloDoesNotHaveAssets(siloResponder, 1e21);
+        _siloHasSomeTotalSupply(responderSilo);
+        _siloHasNoAssets(responderSilo);
+    }
+
+    function _withdraw(ISilo _silo, address _user, uint256 _amount) internal {
+        vm.startPrank(_user);
+        _silo.withdraw(_amount, _user, _user);
+        vm.stopPrank();
     }
 
     function _withdrawFromControllerSilo() internal {
-        _withdraw(siloController, ArbitrumLib.WETH_WHALE, 1e21);
+        _withdraw(controllerSilo, ArbitrumLib.WETH_WHALE, 1e21);
+    }
+
+    function _withdrawFromResponderSilo() internal {
+        _withdraw(responderSilo, ArbitrumLib.WETH_WHALE, 1e21);
     }
 
     function _userHasShares(
@@ -141,7 +151,7 @@ contract SharedAssetTest is Labels {
         );
     }
 
-    function _siloDoesNotHaveAssets(ISilo _silo, uint256 _amount) internal {
+    function _siloHasNoAssets(ISilo _silo) internal {
         assertEq(
             IERC20(_silo.asset()).balanceOf(address(_silo)),
             0,
@@ -155,5 +165,90 @@ contract SharedAssetTest is Labels {
 
     function test_DepositToControllerSilo() public {
         _depositToControllerSilo();
+    }
+
+    function _siloHasNoSharesFromOtherSilo(
+        ISilo _silo,
+        ISilo _otherSilo
+    ) internal {
+        assertEq(
+            _otherSilo.balanceOf(address(_silo)),
+            0,
+            "silo should not have collateral from other silo"
+        );
+    }
+
+    function _hasTokenBalance(
+        address _token,
+        address _user,
+        uint256 _amount
+    ) internal {
+        assertEq(
+            IERC20(_token).balanceOf(_user),
+            _amount,
+            "user should have token balance"
+        );
+    }
+
+    function test_WithdrawFromControllerSilo() public {
+        uint256 initialUserWETHBalance = IERC20(ArbitrumLib.WETH).balanceOf(
+            ArbitrumLib.WETH_WHALE
+        );
+
+        _depositToControllerSilo();
+        _withdrawFromControllerSilo();
+        _siloHasNoAssets(controllerSilo);
+        _userHasShares(controllerSilo, ArbitrumLib.WETH_WHALE, 0);
+
+        assertEq(
+            IERC20(ArbitrumLib.WETH).balanceOf(ArbitrumLib.WETH_WHALE),
+            initialUserWETHBalance,
+            "user should have token balance"
+        );
+
+        _siloHasNoSharesFromOtherSilo(controllerSilo, responderSilo);
+    }
+
+    function _depositToResponderSilo() internal {
+        _deposit(responderSilo, ArbitrumLib.WETH_WHALE, 1e21);
+    }
+
+    function test_WithdrawFromResponderSilo() public {
+        uint256 initialUserWETHBalance = IERC20(ArbitrumLib.WETH).balanceOf(
+            ArbitrumLib.WETH_WHALE
+        );
+
+        _depositToControllerSilo();
+        _siloHasSomeTotalSupply(responderSilo);
+        _userHasShares(responderSilo, ArbitrumLib.WETH_WHALE, 0);
+        _siloHasAssets(responderSilo, 0);
+
+        _depositToResponderSilo();
+        _userHasShares(responderSilo, ArbitrumLib.WETH_WHALE, 1e21);
+        _siloHasAssets(responderSilo, 1e21);
+        _siloHasSomeTotalSupply(responderSilo);
+
+        _withdrawFromResponderSilo();
+        _siloHasNoAssets(responderSilo);
+        _userHasShares(responderSilo, ArbitrumLib.WETH_WHALE, 0);
+
+        _hasTokenBalance(
+            ArbitrumLib.WETH,
+            ArbitrumLib.WETH_WHALE,
+            initialUserWETHBalance - 1e21
+        );
+    }
+
+    function _borrow(ISilo _silo, address _user, uint256 _amount) internal {
+        vm.startPrank(_user);
+        _silo.borrow(_amount, _user, _user);
+        vm.stopPrank();
+    }
+
+    function test_Borrow() public {
+        _depositToControllerSilo();
+        _depositToResponderSilo();
+
+        _borrow(controllerSilo, ArbitrumLib.WETH_WHALE, 1e21);
     }
 }

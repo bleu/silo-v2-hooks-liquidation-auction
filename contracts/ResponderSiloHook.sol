@@ -12,13 +12,13 @@ import {PartialLiquidation} from "silo-contracts-v2/silo-core/contracts/utils/ho
 
 /// @dev Example of hook, that prevents borrowing asset. Note: borrowing same asset is still available.
 contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
-    address public siloResponder;
+    address public responderSilo;
     address public controllerSilo;
 
     event Log(string message);
     event Log(uint256 value);
     event Log(string message, uint256 value);
-
+    event Log(string message, bytes value);
     error ResponderHook_WrongSilo();
 
     /// @dev this method is mandatory and it has to initialize inherited contracts
@@ -49,18 +49,18 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         address sharedAsset
     ) internal {
         (address silo0, address silo1) = _siloConfig.getSilos();
-        address siloResponderCached;
+        address responderSiloCached;
 
-        if (ISilo(silo0).asset() == sharedAsset) siloResponderCached = silo0;
+        if (ISilo(silo0).asset() == sharedAsset) responderSiloCached = silo0;
         else if (ISilo(silo1).asset() == sharedAsset)
-            siloResponderCached = silo1;
+            responderSiloCached = silo1;
         else revert ResponderHook_WrongSilo();
 
-        siloResponder = siloResponderCached;
+        responderSilo = responderSiloCached;
 
         // fetch current setup in case there were some hooks already implemented
         (uint256 hooksBefore, uint256 hooksAfter) = _hookReceiverConfig(
-            siloResponderCached
+            responderSiloCached
         );
 
         // It is recommended to use `addAction` and `removeAction` when working with hook.
@@ -71,11 +71,22 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
             hooksAfter,
             Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
         );
+
+        hooksAfter = Hook.addAction(
+            hooksAfter,
+            Hook.WITHDRAW | Hook.COLLATERAL_TOKEN
+        );
+
         hooksBefore = Hook.addAction(
             hooksBefore,
             Hook.DEPOSIT | Hook.COLLATERAL_TOKEN
         );
-        _setHookConfig(siloResponderCached, hooksBefore, hooksAfter);
+
+        hooksBefore = Hook.addAction(
+            hooksBefore,
+            Hook.WITHDRAW | Hook.COLLATERAL_TOKEN
+        );
+        _setHookConfig(responderSiloCached, hooksBefore, hooksAfter);
     }
 
     /// @inheritdoc IHookReceiver
@@ -84,7 +95,7 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         uint256 _action,
         bytes calldata _inputAndOutput
     ) public override {
-        if (_silo != siloResponder) {
+        if (_silo != responderSilo) {
             return;
         }
 
@@ -112,7 +123,7 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         // Skip the GaugeHookReceiver.afterAction call that's causing the error
         // GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
 
-        if (_silo != siloResponder) {
+        if (_silo != responderSilo) {
             return;
         }
 
@@ -141,8 +152,8 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
         );
 
         if (input.receiver == controllerSilo) {
-            ISilo(siloResponder).callOnBehalfOfSilo(
-                ISilo(siloResponder).asset(),
+            ISilo(responderSilo).callOnBehalfOfSilo(
+                ISilo(responderSilo).asset(),
                 0,
                 ISilo.CallType.Call,
                 abi.encodeWithSelector(
@@ -155,7 +166,11 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
     }
 
     function _beforeWithdraw(bytes calldata _inputAndOutput) internal {
-        // TODO: implement
+        emit Log("Before withdraw", _inputAndOutput);
+    }
+
+    function _afterWithdraw(bytes calldata _inputAndOutput) internal {
+        emit Log("After withdraw", _inputAndOutput);
     }
 
     function _beforeBorrow(bytes calldata _inputAndOutput) internal {
@@ -163,10 +178,6 @@ contract ResponderSiloHook is GaugeHookReceiver, PartialLiquidation {
     }
 
     function _beforeLiquidate(bytes calldata _inputAndOutput) internal {
-        // TODO: implement
-    }
-
-    function _afterWithdraw(bytes calldata _inputAndOutput) internal {
         // TODO: implement
     }
 

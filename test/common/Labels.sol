@@ -110,7 +110,7 @@ contract Labels is Test {
 
     // Helper function to check if a hook is a controller hook
     function _isControllerHook(address _hook) internal view returns (bool) {
-        try ControllerSiloHook(_hook).siloController() returns (address) {
+        try ControllerSiloHook(_hook).controllerSilo() returns (address) {
             return true;
         } catch {
             return false;
@@ -119,7 +119,7 @@ contract Labels is Test {
 
     // Helper function to check if a hook is a responder hook
     function _isResponderHook(address _hook) internal view returns (bool) {
-        try ResponderSiloHook(_hook).siloResponder() returns (address) {
+        try ResponderSiloHook(_hook).responderSilo() returns (address) {
             return true;
         } catch {
             return false;
