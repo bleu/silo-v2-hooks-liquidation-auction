@@ -1,0 +1,174 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.28;
+
+import {IHookReceiver} from "silo-contracts-v2/silo-core/contracts/interfaces/IHookReceiver.sol";
+import {ISiloConfig} from "silo-contracts-v2/silo-core/contracts/interfaces/ISiloConfig.sol";
+import {ISilo} from "silo-contracts-v2/silo-core/contracts/interfaces/ISilo.sol";
+
+import {Hook} from "silo-contracts-v2/silo-core/contracts/lib/Hook.sol";
+import {BaseHookReceiver} from "silo-contracts-v2/silo-core/contracts/utils/hook-receivers/_common/BaseHookReceiver.sol";
+import {GaugeHookReceiver} from "silo-contracts-v2/silo-core/contracts/utils/hook-receivers/gauge/GaugeHookReceiver.sol";
+import {PartialLiquidation} from "silo-contracts-v2/silo-core/contracts/utils/hook-receivers/liquidation/PartialLiquidation.sol";
+
+/// @dev Example of hook, that prevents borrowing asset. Note: borrowing same asset is still available.
+contract ControllerSiloHook is GaugeHookReceiver, PartialLiquidation {
+    address public siloController;
+    address[] public responderSilos;
+
+    error ControllerHook_WrongSilo();
+
+    /// @dev this method is mandatory and it has to initialize inherited contracts
+    function initialize(
+        ISiloConfig _siloConfig,
+        bytes calldata _data
+    ) external override initializer {
+        // do not remove initialization lines, if you want fully compatible functionality
+        (address owner, address sharedAsset) = abi.decode(
+            _data,
+            (address, address)
+        );
+
+        // initialize hook with SiloConfig address.
+        // SiloConfig is the source of all information about Silo markets you are extending.
+        BaseHookReceiver.__BaseHookReceiver_init(_siloConfig);
+
+        // initialize GaugeHookReceiver. Owner can set "gauge" aka incentives contract for a Silo retroactively.
+        GaugeHookReceiver.__GaugeHookReceiver_init(owner);
+
+        __ControllerHook_init(_siloConfig, sharedAsset);
+    }
+
+    function __ControllerHook_init(
+        ISiloConfig _siloConfig,
+        address sharedAsset
+    ) internal {
+        (address silo0, address silo1) = _siloConfig.getSilos();
+        address siloControllerCached;
+
+        if (ISilo(silo0).asset() == sharedAsset) siloControllerCached = silo0;
+        else if (ISilo(silo1).asset() == sharedAsset)
+            siloControllerCached = silo1;
+        else revert ControllerHook_WrongSilo();
+
+        siloController = siloControllerCached;
+
+        // fetch current setup in case there were some hooks already implemented
+        (uint256 hooksBefore, uint256 hooksAfter) = _hookReceiverConfig(
+            siloControllerCached
+        );
+
+        // your code here
+        //
+        // It is recommended to use `addAction` and `removeAction` when working with hook.
+        // It is expected that hooks bitmap will store settings for multiple hooks and utility
+        // functions like `addAction` and `removeAction` will make sure to not override
+        // other hooks' settings.
+        hooksAfter = Hook.addAction(hooksAfter, Hook.DEPOSIT);
+        _setHookConfig(siloControllerCached, hooksBefore, hooksAfter);
+    }
+
+    // We assume no liquidity will have been deployed before all the responder silos are registered
+    function registerResponderSilo(address _responderSilo) external {
+        responderSilos.push(_responderSilo);
+    }
+
+    /// @inheritdoc IHookReceiver
+    function beforeAction(
+        address _silo,
+        uint256 _action,
+        bytes calldata _inputAndOutput
+    ) public override {
+        if (_silo != siloController) {
+            return;
+        }
+
+        if (Hook.matchAction(_action, Hook.BORROW)) {
+            _beforeBorrow(_inputAndOutput);
+        } else if (Hook.matchAction(_action, Hook.DEPOSIT)) {
+            _beforeDeposit(_inputAndOutput);
+        } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
+            _beforeWithdraw(_inputAndOutput);
+        } else if (Hook.matchAction(_action, Hook.LIQUIDATION)) {
+            _beforeLiquidate(_inputAndOutput);
+        } else {
+            revert RequestNotSupported();
+        }
+    }
+
+    /// @inheritdoc IHookReceiver
+    function afterAction(
+        address _silo,
+        uint256 _action,
+        bytes calldata _inputAndOutput
+    ) public override(GaugeHookReceiver, IHookReceiver) {
+        GaugeHookReceiver.afterAction(_silo, _action, _inputAndOutput);
+        if (_silo != siloController) {
+            return;
+        }
+
+        if (Hook.matchAction(_action, Hook.BORROW)) {
+            _afterBorrow(_inputAndOutput);
+        } else if (Hook.matchAction(_action, Hook.DEPOSIT)) {
+            _afterDeposit(_inputAndOutput);
+        } else if (Hook.matchAction(_action, Hook.WITHDRAW)) {
+            _afterWithdraw(_inputAndOutput);
+        } else if (Hook.matchAction(_action, Hook.LIQUIDATION)) {
+            _afterLiquidate(_inputAndOutput);
+        } else {
+            revert RequestNotSupported();
+        }
+    }
+
+    function _beforeDeposit(bytes calldata _inputAndOutput) internal {
+        // No-op. We don't need to do anything before a deposit.
+    }
+
+    function _afterDeposit(bytes calldata _inputAndOutput) internal {
+        Hook.AfterDepositInput memory input = Hook.afterDepositDecode(
+            _inputAndOutput
+        );
+
+        for (uint256 i = 0; i < responderSilos.length; i++) {
+            ISilo(siloController).callOnBehalfOfSilo(
+                responderSilos[i],
+                0,
+                ISilo.CallType.Call,
+                abi.encodeWithSelector(
+                    ISilo.deposit.selector,
+                    input.assets,
+                    address(siloController)
+                )
+            );
+        }
+    }
+
+    function _beforeWithdraw(bytes calldata _inputAndOutput) internal {
+        // TODO: implement
+    }
+
+    function _beforeBorrow(bytes calldata _inputAndOutput) internal {
+        // TODO: implement
+    }
+
+    function _beforeLiquidate(bytes calldata _inputAndOutput) internal {
+        // TODO: implement
+    }
+
+    function _afterWithdraw(bytes calldata _inputAndOutput) internal {
+        // TODO: implement
+    }
+
+    function _afterBorrow(bytes calldata _inputAndOutput) internal {
+        // TODO: implement
+    }
+
+    function _afterLiquidate(bytes calldata _inputAndOutput) internal {
+        // TODO: implement
+    }
+
+    function getHookConfig(
+        address _silo
+    ) public view returns (uint256 hooksBefore, uint256 hooksAfter) {
+        return _hookReceiverConfig(_silo);
+    }
+}
