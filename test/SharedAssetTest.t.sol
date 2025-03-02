@@ -58,11 +58,7 @@ contract SharedAssetTest is Labels {
         responderSilo = ISilo(clonedResponderHook.responderSilo());
 
         clonedControllerHook.registerResponderSilo(
-            clonedResponderHook.responderSilo()
-        );
-
-        // Register the responder hook with the controller hook
-        clonedControllerHook.registerResponderHook(
+            address(responderSilo),
             address(clonedResponderHook)
         );
 
